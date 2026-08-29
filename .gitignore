@@ -1,4 +1,5 @@
 # dependencies
+node_modules
 node_modules/
 .pnp/
 .pnp.js
@@ -70,3 +71,5 @@ contracts/**/spec/target/
 # Playwright
 playwright-report/
 test-results/
+blob-report/
+all-blob-reports/

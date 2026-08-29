@@ -52,6 +52,10 @@
     "ci": "npm run typecheck && npm run lint -- --max-warnings 0 && npm test && npm run build && bash scripts/validate-deploy-config.sh",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "test:e2e:shard": "node scripts/e2e-sharding.mjs run",
+    "test:e2e:failed": "playwright test --last-failed",
+    "test:e2e:merge-reports": "playwright merge-reports --reporter=html,list ./all-blob-reports",
+    "test:e2e:inspect-shards": "node scripts/e2e-sharding.mjs list",
     "test:testnet": "node scripts/testnet-integration.mjs",
     "test:contract:integration": "node scripts/testnet-integration.mjs"
   },

@@ -6,6 +6,21 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      shard_total:
+        description: "Number of parallel E2E worker shards"
+        required: false
+        default: "4"
+      failed_only:
+        description: "Rerun only failed tests (flaky triage mode)"
+        type: boolean
+        required: false
+        default: false
+      project:
+        description: "Playwright project/browser to run"
+        required: false
+        default: "chromium"
 
 permissions:
   contents: read
@@ -251,20 +266,24 @@ jobs:
           echo "✅ All 19 pages healthy"
 
   # ══════════════════════════════════════════════════════════════
-  # 10. E2E TESTS — Playwright against a self-hosted production build.
+  # 10. E2E TESTS — Playwright sharded across parallel workers
   #
   # The E2E suite is deterministic by design (auth-gate 401s, wallet-gated
-  # page states, health 200|503), so it runs against a production build +
-  # Postgres — NOT the live Vercel deployment, which races deploys and
-  # depends on a working production DATABASE_URL. The build happens in this
-  # job rather than reusing the next-build artifact: upload-artifact@v4
-  # excludes gitignored paths and `.next/` is gitignored.
+  # page states, health 200|503), running against a production build +
+  # Postgres. Tests are sharded across 4 parallel workers using Playwright
+  # spec sharding, cutting wall-clock execution time significantly.
+  # Blob reports are generated per-shard and combined in e2e-report-merge.
   # ══════════════════════════════════════════════════════════════
   e2e-tests:
-    name: "🔟 Frontend — E2E (Playwright)"
+    name: "🔟 Frontend — E2E Shard [${{ matrix.shardIndex }}/${{ matrix.shardTotal }}]"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     needs: contract-wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2, 3, 4]
+        shardTotal: [4]
     services:
       postgres:
         image: postgres:16-alpine
@@ -285,6 +304,8 @@ jobs:
       AUTH_SECRET: ci-e2e-auth-secret-00000000000000000000
       NEXT_PUBLIC_CONTRACT_ID: CCQGGUJRRVXMHNEX2RYPODGJE2YRMYY4Y7A3KTJH3QP2LWZLTCOPRPET
       NEXT_PUBLIC_EMITTER_CONTRACT_ID: CDAVU2XJ7C2Y52GRJZKRG3HDI7AJ2K2FHAFH5FPDTSUQAV7XNBQNNVAN
+      SHARD_INDEX: ${{ matrix.shardIndex }}
+      SHARD_TOTAL: ${{ matrix.shardTotal }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -316,15 +337,49 @@ jobs:
             sleep 2
           done
           curl -sf -o /dev/null http://localhost:3000/ || { echo "next start failed to come up"; tail -20 /tmp/next-start.log; exit 1; }
-      - name: Run E2E tests against production build
-        run: npx playwright test --project=chromium
-      - name: Upload E2E report on failure
-        if: failure()
+      - name: Run E2E tests against production build (shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
+        run: |
+          if [ "${{ inputs.failed_only }}" = "true" ]; then
+            npx playwright test --project=${{ inputs.project || 'chromium' }} --last-failed
+          else
+            npx playwright test --project=${{ inputs.project || 'chromium' }} --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+          fi
+      - name: Upload Playwright blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-shard-${{ matrix.shardIndex }}
+          path: blob-report/
+          retention-days: 7
+
+  # ══════════════════════════════════════════════════════════════
+  # 10b. E2E MERGE REPORTS — Merges sharded Playwright test reports
+  # ══════════════════════════════════════════════════════════════
+  e2e-report-merge:
+    name: "🔟 Frontend — E2E Combined Report"
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: '.nvmrc', cache: "npm" }
+      - run: npm ci
+      - name: Download all blob reports
+        uses: actions/download-artifact@v4
+        with:
+          path: all-blob-reports
+          pattern: blob-report-shard-*
+          merge-multiple: true
+      - name: Merge Playwright reports into combined HTML report
+        run: npx playwright merge-reports --reporter=html,list ./all-blob-reports
+      - name: Upload combined Playwright report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: playwright-report/
-          retention-days: 7
+          retention-days: 14
 
   # ══════════════════════════════════════════════════════════════
   # 11. PRISMA VALIDATE — Schema integrity, generate, db push
